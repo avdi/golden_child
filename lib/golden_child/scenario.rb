@@ -123,7 +123,11 @@ module GoldenChild
       script_path = (control_dir + "scripts" + transcript_name)
       script_path.write(script)
       output, _status = Timeout.timeout(1) do
-        Open3.capture2e(env, ENV.fetch("SHELL"){ "/bin/sh" }, script_path.to_s)
+        Open3.capture2e(
+          env,
+          ENV.fetch("SHELL"){ "/bin/sh" },
+          script_path.realpath.to_s,
+          chdir: actual_path.to_s)
       end
       transcript_actual_path = (transcript_actual_dir + transcript_name)
       transcript_actual_path.dirname.mkpath
@@ -301,7 +305,7 @@ module GoldenChild
     def env
       @env ||= begin
                  env  = configuration.env.dup
-                 path = stub_dir.to_s + ":" + (env.fetch("PATH"){ ENV["PATH"] })
+                 path = stub_dir.realpath.to_s + ":" + (env.fetch("PATH"){ ENV["PATH"] })
                  env["PATH"] = path
                  env
                end

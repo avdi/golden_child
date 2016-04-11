@@ -16,9 +16,18 @@ module GoldenChild
       scenario.populate_from(source_dir, caller)
     end
 
+    def stub_exec(*args, **options, &block)
+      scenario.stub_out_executable(*args, **options, &block)
+    end
+
     # (see Scenario#run)
     def run(*args, ** options, &block)
       scenario.run(*args, caller: caller, ** options)
+    end
+
+    # (see Scenario#reproduce_transcript)
+    def reproduce(*args, **options, &block)
+      scenario.reproduce_transcript(*args, **options, &block)
     end
 
     # (see Scenario#within_zip)

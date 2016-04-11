@@ -4,6 +4,7 @@ require "open3"
 require "rake/file_list"
 require "forwardable"
 require "rspec/support"
+require "shellwords"
 
 module GoldenChild
   class Scenario
@@ -15,7 +16,7 @@ module GoldenChild
     # @!method project_root
     #   (see Configuration#project_root)
     def_delegators :configuration, :golden_path, :actual_root, :project_root,
-                   :content_filters
+      :content_filters
 
     # @abstract
     Validation = Struct.new(:message)
@@ -43,7 +44,7 @@ module GoldenChild
     #
     # @param [String, Pathname] source_dir
     # @param [Array] caller
-    def populate_from(source_dir, caller=caller)
+    def populate_from(source_dir, caller=self.caller)
       Dir.chdir(project_root) do
         raise "Scenario has not been set up" unless actual_path.exist?
         source_dir = Pathname(source_dir)
@@ -52,10 +53,19 @@ module GoldenChild
         end
 
         Dir.foreach(source_dir) do |entry|
-          next if %w[. ..].include?(entry)
+          next if %w[. .. TRANSCRIPTS].include?(entry)
           copy_entry source_dir + entry, actual_path + entry
         end
+        if (transcript_dir = (source_dir + "TRANSCRIPTS")).directory?
+          copy_entry transcript_dir, transcript_master_dir
+        end
       end
+    end
+
+    def stub_out_executable(executable_name, **)
+      path = (stub_dir + executable_name)
+      path.write("#!/usr/bin/env ruby\nexit 0\n")
+      path.chmod(path.stat.mode | 0100)
     end
 
     # Run a command in the context of the current scenario.
@@ -68,12 +78,12 @@ module GoldenChild
     # @param [Hash] env Environment variables for the command
     # @param [Array] caller
     # @param [Hash] options
-    def run(*args, allow_fail: false, env: self.env, caller: caller, ** options)
+    def run(*args, allow_fail: false, env: self.env, caller: self.caller, ** options)
       options[:chdir]        ||= actual_path.to_s
       env                    = env.map { |k, v| [k.to_s, v.to_s] }.to_h
       stdout, stderr, status = Open3.capture3(env, *args, ** options)
       command_history.push(
-          command: args, status: status, stdout: stdout, stderr: stderr)
+        command: args, status: status, stdout: stdout, stderr: stderr)
       command_log = ""
       command_log << "\nCommand: #{args}"
       command_log << "\nEnvironment:"
@@ -83,16 +93,42 @@ module GoldenChild
       command_log << "\nExited with status #{status.exitstatus}"
       command_log << "\n========== Command STDOUT ==========\n"
       command_log << stdout
-      command_log << "\n========== End STDOUT ==========\n"
+      command_log << "\n========== End STDOUT ==============\n"
       command_log << "\n========== Command STDERR ==========\n"
       command_log << stderr
-      command_log << "\n========== End STDERR ==========\n"
+      command_log << "\n========== End STDERR ==============\n"
       (control_dir + "commands.log").open("a") do |f|
         f.write(command_log)
       end
       unless status.success? || allow_fail
         fail RuntimeError, command_log, caller
       end
+    end
+
+    def reproduce_transcript(transcript_name, **options)
+      transcript_path = transcript_master_dir + transcript_name
+      transcript_path.exist? or fail "No such transcript: #{transcript_name}"
+      transcript_text = transcript_path.read
+      script = transcript_text.each_line.map(&:chomp).flat_map { |line|
+        case line
+        when /\A\$ /
+          [ "echo #{Shellwords.shellescape(line)}", $' ]
+        when /\A\s*#/
+          [ "echo #{Shellwords.shellescape(line)}" ]
+        else
+          []
+        end
+      }.join("\n").concat("\n")
+      (control_dir + "scripts").mkpath
+      script_path = (control_dir + "scripts" + transcript_name)
+      script_path.write(script)
+      output, _status = Timeout.timeout(1) do
+        Open3.capture2e(env, ENV.fetch("SHELL"){ "/bin/sh" }, script_path.to_s)
+      end
+      transcript_actual_path = (transcript_actual_dir + transcript_name)
+      transcript_actual_path.dirname.mkpath
+      IO.write(transcript_actual_path, output)
+      validate(transcript_path.relative_path_from(master_path))
     end
 
     # Unzip a zip file, and execute commands in the context of the unzipped
@@ -108,7 +144,7 @@ module GoldenChild
       unzip_dir = unzip_dir_for(relative_filename)
       mkpath unzip_dir
       unzip_succeeded =
-          system(*%W[unzip -qq #{filename} -d #{unzip_dir}])
+        system(*%W[unzip -qq #{filename} -d #{unzip_dir}])
       raise "Could not unzip #{filename}" unless unzip_succeeded
       push_working_dir(unzip_dir.relative_path_from(current_actual_path)) do
         yield(unzip_dir)
@@ -132,6 +168,7 @@ module GoldenChild
           actual_file  = current_actual_path + path
           shortcode    = get_shortcode_for(actual_file)
           approval_cmd = "golden accept #{shortcode}"
+          clip_cmd     = "golden clip #{shortcode}"
           message      = ""
           file_pass    = false
           if !actual_file.exist?
@@ -151,11 +188,13 @@ module GoldenChild
             message << "Master: #{master_file}"
             message << "must be a file, but it is a #{master_file.ftype}."
           elsif filtered_files_differ?(master_file, actual_file)
-            message << "Actual: #{actual_file}"
-            message << "\ndiffers from master: #{master_file}"
-            message << "\n"
+            message << "Actual file:\n"
+            message << "    #{actual_file}"
+            message << "\nDiffers from master:\n"
+            message << "    #{master_file}\n"
             message << diff(master_file, actual_file)
-            message << "\n\nIf the changes look correct, run `#{approval_cmd}`"
+            message << "\n\nTo update master, run: `#{approval_cmd}`\n"
+            message << "To copy results to clipboard, run: `#{clip_cmd}`\n"
           else
             message << "Actual file #{actual_file} matches master #{master_file}"
             file_pass = true
@@ -187,7 +226,7 @@ module GoldenChild
       @filtered_files ||= {} # memoization
       @filtered_files.fetch(filename) {
         @filtered_files[filename] = content_filters.reduce(filename.read) {
-            |content, filter|
+          |content, filter|
           filter.call(content)
         }
       }
@@ -208,10 +247,24 @@ module GoldenChild
       mkpath master_path.parent
       rmtree actual_path
       mkpath actual_path
+      mkpath stub_dir
       mkpath control_dir
+      mkpath master_path
     end
 
     def teardown
+    end
+
+    def transcript_master_dir
+      (master_path + "TRANSCRIPTS")
+    end
+
+    def transcript_actual_dir
+      (actual_path + "TRANSCRIPTS")
+    end
+
+    def stub_dir
+      (control_dir + "stub_bin")
     end
 
     def actual_path
@@ -246,7 +299,12 @@ module GoldenChild
 
     # @return [Hash] editable env var hash, defaults to {#configuration}
     def env
-      @env ||= configuration.env.dup
+      @env ||= begin
+                 env  = configuration.env.dup
+                 path = stub_dir.to_s + ":" + (env.fetch("PATH"){ ENV["PATH"] })
+                 env["PATH"] = path
+                 env
+               end
     end
 
     private

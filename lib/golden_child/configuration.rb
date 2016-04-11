@@ -1,7 +1,10 @@
 require "golden_child/block_content_filter"
+require "fileutils"
 
 module GoldenChild
   class Configuration
+    include FileUtils
+
     # @return [Pathname] the directory in which "actual" results will be generated
     def actual_root
       golden_path + "actual"

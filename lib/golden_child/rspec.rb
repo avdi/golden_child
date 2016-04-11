@@ -1,3 +1,5 @@
+require "rspec/core"
+require "rspec/matchers"
 require "golden_child"
 
 module GoldenChild::RspecMatchers
@@ -6,6 +8,17 @@ module GoldenChild::RspecMatchers
   matcher :match_master do |**options|
     match do |actual|
       @result = scenario.validate(*actual, **options)
+      @result.passed?
+    end
+
+    failure_message do |actual|
+      @result.message
+    end
+  end
+
+  matcher :be_reproducible do |**options|
+    match do |actual|
+      @result = scenario.reproduce_transcript(actual, **options)
       @result.passed?
     end
 
@@ -40,4 +53,3 @@ RSpec.configure do |config|
     scenario.teardown
   end
 end
-
